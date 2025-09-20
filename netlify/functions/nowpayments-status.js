@@ -4,7 +4,7 @@ export async function handler(event) {
     if (!id) return { statusCode: 400, body: JSON.stringify({ error: "Missing id" }) };
 
     const r = await fetch(`https://api.nowpayments.io/v1/payment/${id}`, {
-      headers: { "x-api-key": process.env.NOWPAYMENTS_API_KEY },
+      headers: { "x-api-key": process.env.NOWPAYMENTS_API_KEY }
     });
     const data = await r.json();
 
