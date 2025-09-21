@@ -271,7 +271,7 @@ export default function App() {
                 />
                 <button
                   onClick={submitGuess}
-                  disabled={guess.trim()==="" || Number(guess)<1 || Number(guess)>100}
+                  disabled={invalidGuess}
                   className="px-4 py-2 rounded-xl bg-neutral-900 text-white font-semibold shadow disabled:opacity-50 active:scale-[0.98]"
                 >
                   Guess
@@ -383,13 +383,25 @@ export default function App() {
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-2">
-                    <a
+                    {/* ⇩⇩⇩  REPLACED BUTTON  ⇩⇩⇩ */}
+                    <button
                       className="px-4 py-2 rounded-xl bg-white border border-neutral-300 text-center"
-                      href={invoice.address || "#"}
-                      target="_blank"
+                      onClick={() => {
+                        if (!invoice?.address) return;
+                        if (invoice.address.startsWith("http")) {
+                          window.open(invoice.address, "_blank");
+                        } else {
+                          // copy TRC20 address
+                          navigator.clipboard.writeText(invoice.address).then(
+                            () => alert("Address copied to clipboard.\nSend USDT (TRC20) to this address."),
+                            () => alert("Could not copy. Please copy the address manually.")
+                          );
+                        }
+                      }}
                     >
-                      Open Invoice
-                    </a>
+                      {invoice?.address?.startsWith("http") ? "Open Invoice" : "Copy Address"}
+                    </button>
+
                     <button onClick={checkPayment} className="px-4 py-2 rounded-xl bg-neutral-900 text-white font-semibold">
                       Mark as Paid (dev)
                     </button>
