@@ -21,18 +21,14 @@ exports.handler = async (event) => {
 
     const payCurrency = network === "TRON" ? "USDTTRC20" : "USDTPOLYGON";
 
-    const resp = await fetch("https://api.nowpayments.io/v1/payment", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-  price_amount: Number(amount),   // مثلا 1.50
-  price_currency: "USD",          // تغییر مهم
-  pay_currency: payCurrency,      // TRON => USDTTRC20
+// 👇 تغییر مهم: price_currency را برابر pay_currency بگذار
+body: JSON.stringify({
+  price_amount: Number(amount),      // مثلا 14.85
+  price_currency: payCurrency,       // قبلا USD/USDT بود → بکن USDTTRC20
+  pay_currency: payCurrency,         // همان شبکه انتخابی
   order_id: `order_${Date.now()}`,
 }),
+
 
 
     const text = await resp.text();
