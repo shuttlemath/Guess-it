@@ -1,7 +1,41 @@
+const https = require("https");
+
 const headers = {
   "Content-Type": "application/json",
   "Access-Control-Allow-Origin": "*",
 };
+
+// helper: HTTPS request (no external deps)
+function httpsRequest({ method, path, bodyObj, apiKey }) {
+  const options = {
+    hostname: "api.nowpayments.io",
+    port: 443,
+    path,
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+    },
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          resolve({ status: res.statusCode, json });
+        } catch {
+          resolve({ status: res.statusCode, text: data });
+        }
+      });
+    });
+    req.on("error", reject);
+    if (bodyObj) req.write(JSON.stringify(bodyObj));
+    req.end();
+  });
+}
 
 exports.handler = async (event) => {
   try {
@@ -19,29 +53,33 @@ exports.handler = async (event) => {
       return { statusCode: 500, headers, body: JSON.stringify({ error: "Server misconfig: NOWPAYMENTS_API_KEY missing" }) };
     }
 
+    // برای حذف نیاز به estimate، هر دو currency را یکسان می‌گیریم
     const payCurrency = network === "TRON" ? "USDTTRC20" : "USDTPOLYGON";
 
-// 👇 تغییر مهم: price_currency را برابر pay_currency بگذار
-body: JSON.stringify({
-  price_amount: Number(amount),      // مثلا 14.85
-  price_currency: payCurrency,       // قبلا USD/USDT بود → بکن USDTTRC20
-  pay_currency: payCurrency,         // همان شبکه انتخابی
-  order_id: `order_${Date.now()}`,
-}),
+    const bodyObj = {
+      price_amount: Number(amount),    // مثلاً 1.50 یا 14.85
+      price_currency: payCurrency,     // = USDTTRC20
+      pay_currency: payCurrency,       // = USDTTRC20
+      order_id: `order_${Date.now()}`,
+    };
 
+    const resp = await httpsRequest({
+      method: "POST",
+      path: "/v1/payment",
+      bodyObj,
+      apiKey,
+    });
 
-
-    const text = await resp.text();
-    let data;
-    try { data = JSON.parse(text); } catch {
-      // NOWPayments sometimes returns HTML on error → surface it
-      return { statusCode: 502, headers, body: JSON.stringify({ error: "Upstream non-JSON", upstream: text.slice(0, 200) }) };
+    // اگر upstream JSON نباشد
+    if (!resp.json) {
+      return { statusCode: 502, headers, body: JSON.stringify({ error: "Upstream non-JSON", upstream: resp.text?.slice(0, 200) }) };
     }
 
-    if (!resp.ok) {
-      return { statusCode: resp.status, headers, body: JSON.stringify({ error: "NOWPayments error", details: data }) };
+    if (resp.status < 200 || resp.status >= 300) {
+      return { statusCode: resp.status, headers, body: JSON.stringify({ error: "NOWPayments error", details: resp.json }) };
     }
 
+    const data = resp.json;
     return {
       statusCode: 200,
       headers,
