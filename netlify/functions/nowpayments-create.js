@@ -28,12 +28,12 @@ exports.handler = async (event) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        price_amount: Number(amount),
-        price_currency: "USDT",
-        pay_currency: payCurrency,
-        order_id: `order_${Date.now()}`,
-      }),
-    });
+  price_amount: Number(amount),   // مثلا 1.50
+  price_currency: "USD",          // تغییر مهم
+  pay_currency: payCurrency,      // TRON => USDTTRC20
+  order_id: `order_${Date.now()}`,
+}),
+
 
     const text = await resp.text();
     let data;
