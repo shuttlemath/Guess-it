@@ -4,7 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 // --- Supabase bootstrap (reads from window.__ENV__ or localStorage) ---
 function getEnv(key: string) {
   // @ts-ignore
-  if (typeof window !== "undefined" && window.__ENV__ && window.__ENV__[key]) return window.__ENV__[key];
+  if (typeof window !== "undefined" && (window as any).__ENV__ && (window as any).__ENV__[key]) return (window as any).__ENV__[key];
   if (typeof window !== "undefined") return localStorage.getItem(key) || "";
   return "";
 }
@@ -15,6 +15,9 @@ const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, 
 type Result = null | "win" | "lose";
 type Mode = "fun" | "serious";
 
+const PRICE_PER = 0.99;   // USDT per coin
+const MIN_COINS = 13;     // minimum coins to buy per order
+
 export default function App() {
   // English UI (LTR)
   useEffect(() => {
@@ -22,32 +25,12 @@ export default function App() {
     return () => document.documentElement.setAttribute("dir", "ltr");
   }, []);
 
-  // Auth
-  const [email, setEmail] = useState("");
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-
+  // (Auth wiring is kept for future; UI hidden)
   useEffect(() => {
     if (!supabase) return;
-    supabase.auth.getUser().then(({ data }) => setUserEmail(data.user?.email ?? null));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
-      setUserEmail(s?.user?.email ?? null);
-    });
-    return () => sub?.subscription.unsubscribe();
+    // warm up session silently (no UI now)
+    supabase.auth.getUser().catch(() => {});
   }, []);
-
-  const sendMagicLink = async () => {
-    if (!supabase) return alert("Supabase not configured.");
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: window.location.origin },
-    });
-    if (error) alert(error.message);
-    else alert("Sign-in link sent. Check your email.");
-  };
-  const signOut = async () => {
-    if (!supabase) return;
-    await supabase.auth.signOut();
-  };
 
   // Game state
   const [coins, setCoins] = useState<number>(() => {
@@ -128,40 +111,96 @@ export default function App() {
     [guesses, secret]
   );
 
-  // Purchase (NOWPayments placeholder)
+  // Purchase (TRON only)
   const [buyOpen, setBuyOpen] = useState(false);
-  const [buyCoins, setBuyCoins] = useState(10);
-  const pricePer = 0.99; // USDT per coin
-  const total = (buyCoins * pricePer).toFixed(2);
+  const [buyCoins, setBuyCoins] = useState<number>(MIN_COINS); // default 13
+  const total = useMemo(() => Number((buyCoins * PRICE_PER).toFixed(2)), [buyCoins]);
+  const meetsMin = buyCoins >= MIN_COINS;
+
   const [invoice, setInvoice] = useState<{ id: string; address: string | null } | null>(null);
-  const [network, setNetwork] = useState<"TRON" | "POLYGON">("TRON");
+  const [polling, setPolling] = useState(false);
+  const [lastStatus, setLastStatus] = useState<string | null>(null);
+  const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<{ text: string; kind: "info" | "success" | "error" } | null>(null);
+
+  const sanitizeCoins = (v: string) => {
+    // only natural numbers
+    const n = Math.max(1, Math.floor(Number(v)));
+    return Number.isFinite(n) ? n : 1;
+  };
 
   const createPayment = async () => {
     const res = await fetch("/api/nowpayments/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ network, amount: Number(total), coins: buyCoins }),
+      body: JSON.stringify({ network: "TRON", amount: Number(total), coins: buyCoins }),
     });
     const data = await res.json();
-    if (data.error) alert(data.error);
-    else setInvoice({ id: String(data.id), address: data.address || null });
+    if (data.error) {
+      setStatusMsg({
+        text: typeof data.details === "object" ? JSON.stringify(data.details) : String(data.error),
+        kind: "error",
+      });
+    } else {
+      setInvoice({ id: String(data.id), address: data.address || null });
+      setLastStatus("pending");
+      setLastCheckedAt(null);
+      setStatusMsg({ text: "Invoice created. Awaiting payment…", kind: "info" });
+    }
   };
 
   const checkPayment = async () => {
     if (!invoice) return;
-    const res = await fetch(`/api/nowpayments/status?id=${encodeURIComponent(invoice.id)}`);
-    const data = await res.json();
-    if (data.status === "confirmed") {
-      setCoins((c) => c + buyCoins);
-      setBuyOpen(false);
-      setInvoice(null);
-      alert("Payment confirmed. Coins added.");
-    } else {
-      alert(`Payment status: ${data.status}`);
+    try {
+      setChecking(true);
+      const res = await fetch(`/api/nowpayments/status?id=${encodeURIComponent(invoice.id)}`);
+      const data = await res.json();
+      const status = data.status || "pending";
+      setLastStatus(status);
+      setLastCheckedAt(new Date().toLocaleTimeString());
+
+      if (status === "confirmed") {
+        setCoins((c) => c + buyCoins);
+        setStatusMsg({ text: "Payment confirmed. Coins added 🎉", kind: "success" });
+        setMessage("Payment confirmed. Coins added.");
+        setTimeout(() => {
+          setBuyOpen(false);
+          setInvoice(null);
+          setPolling(false);
+          setStatusMsg(null);
+        }, 1200);
+      } else if (status === "failed") {
+        setStatusMsg({ text: "Payment failed or expired. Please try again.", kind: "error" });
+      } else {
+        setStatusMsg({ text: `Status: ${status}. We’ll keep checking automatically.`, kind: "info" });
+      }
+    } catch (e: any) {
+      setStatusMsg({ text: e?.message || "Network error while checking status.", kind: "error" });
+    } finally {
+      setChecking(false);
     }
   };
 
+  useEffect(() => {
+    if (invoice) {
+      setPolling(true);
+      const immediate = setTimeout(checkPayment, 1500);
+      const iv = setInterval(checkPayment, 30000); // every 30s
+      return () => {
+        clearTimeout(immediate);
+        clearInterval(iv);
+      };
+    } else {
+      setPolling(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoice]);
+
   const invalidGuess = guess.trim() === "" || Number(guess) < 1 || Number(guess) > 100;
+
+  const isHttpLike = (s?: string | null) => !!s && /^https?:\/\//i.test(s);
+  const isWalletAddress = (s?: string | null) => !!s && !isHttpLike(s); // TRON T...
 
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900 flex items-center justify-center p-4">
@@ -175,48 +214,7 @@ export default function App() {
             </div>
           </header>
 
-          {/* Auth (Magic Link) */}
-          <div className="flex items-center justify-between gap-2">
-            {userEmail ? (
-              <>
-                <span className="text-sm text-neutral-600 truncate">Signed in: {userEmail}</span>
-                <button onClick={signOut} className="text-sm px-3 py-1 rounded-lg bg-neutral-200">
-                  Sign out
-                </button>
-              </>
-            ) : (
-              <div className="flex gap-2 w-full">
-                <input
-                  className="flex-1 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-                  placeholder="Email for magic link"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-                <button onClick={sendMagicLink} className="px-3 py-2 rounded-lg bg-neutral-900 text-white text-sm">
-                  Send Link
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Buy / Withdraw */}
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => setBuyOpen(true)}
-              className="w-full px-4 py-2 rounded-xl bg-white border border-neutral-300 text-neutral-800 font-semibold shadow-sm"
-            >
-              Buy Coins
-            </button>
-            <button
-              className="w-full px-4 py-2 rounded-xl bg-white border border-neutral-300 text-neutral-800 font-semibold shadow-sm"
-              disabled
-            >
-              Withdraw (soon)
-            </button>
-          </div>
-          <p className="text-[12px] text-neutral-500">Price per coin: 0.99 USDT.</p>
-
-          {/* Mode select */}
+          {/* Mode select + Start */}
           {!inGame && !result && (
             <>
               <div className="bg-neutral-100 p-2 rounded-xl grid grid-cols-2 gap-2">
@@ -239,7 +237,7 @@ export default function App() {
               </div>
 
               <p className="text-sm text-neutral-500 leading-6">
-                Rules: starting a round costs 1 coin. Fun has 7 guesses (win = coin back). Serious has 6 guesses (win = +2 coins).
+                Rules: start costs 1 coin. Fun: 7 guesses (win = coin back). Serious: 6 guesses (win = +2 coins).
               </p>
 
               <button
@@ -249,6 +247,23 @@ export default function App() {
               >
                 Start / 🪙1
               </button>
+
+              {/* Buy / Withdraw under Start (hidden during game) */}
+              <div className="grid grid-cols-2 gap-2 pt-2">
+                <button
+                  onClick={() => setBuyOpen(true)}
+                  className="w-full px-4 py-2 rounded-xl bg-white border border-neutral-300 text-neutral-800 font-semibold shadow-sm"
+                >
+                  Buy Coins
+                </button>
+                <button
+                  className="w-full px-4 py-2 rounded-xl bg-white border border-neutral-300 text-neutral-800 font-semibold shadow-sm"
+                  disabled
+                >
+                  Withdraw (soon)
+                </button>
+              </div>
+              <p className="text-[12px] text-neutral-500">Price per coin: {PRICE_PER.toFixed(2)} USDT (TRON).</p>
             </>
           )}
 
@@ -327,15 +342,11 @@ export default function App() {
               </button>
             </div>
           )}
-
-          <footer className="pt-2 border-t border-neutral-200 text-[11px] text-neutral-500">
-            Built for quick MVP testing. Starts with 50 coins locally.
-          </footer>
         </div>
       </div>
 
       {/* BUY MODAL */}
-      {buyOpen && (
+      {buyOpen && !inGame && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5 space-y-4">
             <div className="flex items-center justify-between">
@@ -344,75 +355,184 @@ export default function App() {
             </div>
 
             <div className="space-y-3">
-              <label className="block text-sm">Network</label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setNetwork("TRON")}
-                  className={`px-3 py-2 rounded-lg border ${network === "TRON" ? "bg-neutral-900 text-white border-neutral-900" : "bg-white border-neutral-300"}`}
-                >
-                  TRON (USDT TRC20)
-                </button>
-                <button
-                  onClick={() => setNetwork("POLYGON")}
-                  className={`px-3 py-2 rounded-lg border ${network === "POLYGON" ? "bg-neutral-900 text-white border-neutral-900" : "bg-white border-neutral-300"}`}
-                >
-                  Polygon (USDT)
-                </button>
+              <div className="text-sm text-neutral-600">
+                Network: <span className="font-medium">TRON (USDT TRC20)</span>
               </div>
 
               <label className="block text-sm">Coins</label>
               <input
                 type="number"
                 min={1}
-                className="w-full rounded-lg border border-neutral-300 px-3 py-2"
+                step={1}
+                inputMode="numeric"
+                pattern="[0-9]*"
                 value={buyCoins}
-                onChange={(e) => setBuyCoins(Math.max(1, Number(e.target.value)))}
+                onChange={(e) => setBuyCoins(sanitizeCoins(e.target.value))}
+                className="w-full rounded-lg border border-neutral-300 px-3 py-2"
               />
-              <div className="text-sm text-neutral-600">Total: <strong>{total}</strong> USDT</div>
+              <div className="text-sm text-neutral-600">
+                Total: <strong>{total.toFixed(2)}</strong> USDT
+              </div>
+
+              {!meetsMin && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm p-3">
+                  Minimum purchase is <strong>{MIN_COINS}</strong> coins.
+                </div>
+              )}
 
               {!invoice ? (
-                <button onClick={createPayment} className="w-full px-4 py-2 rounded-xl bg-neutral-900 text-white font-semibold">
+                <button
+                  onClick={createPayment}
+                  disabled={!meetsMin}
+                  className={`w-full px-4 py-2 rounded-xl text-white font-semibold ${
+                    meetsMin ? "bg-neutral-900" : "bg-neutral-400 cursor-not-allowed"
+                  }`}
+                >
                   Create Payment Request
                 </button>
               ) : (
-                <div className="space-y-2">
-                  <div className="text-sm">Invoice ID: <span className="font-mono">{invoice.id}</span></div>
-                  {invoice.address && (
-                    <div className="text-sm break-words">
-                      Address / URL: <span className="font-mono">{invoice.address}</span>
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-2">
-                    {/* ⇩⇩⇩  REPLACED BUTTON  ⇩⇩⇩ */}
-                    <button
-                      className="px-4 py-2 rounded-xl bg-white border border-neutral-300 text-center"
-                      onClick={() => {
-                        if (!invoice?.address) return;
-                        if (invoice.address.startsWith("http")) {
-                          window.open(invoice.address, "_blank");
-                        } else {
-                          // copy TRC20 address
-                          navigator.clipboard.writeText(invoice.address).then(
-                            () => alert("Address copied to clipboard.\nSend USDT (TRC20) to this address."),
-                            () => alert("Could not copy. Please copy the address manually.")
-                          );
-                        }
-                      }}
-                    >
-                      {invoice?.address?.startsWith("http") ? "Open Invoice" : "Copy Address"}
-                    </button>
-
-                    <button onClick={checkPayment} className="px-4 py-2 rounded-xl bg-neutral-900 text-white font-semibold">
-                      Mark as Paid (dev)
-                    </button>
-                  </div>
-                </div>
+                <PurchaseDetails
+                  invoice={invoice}
+                  statusMsg={statusMsg}
+                  setStatusMsg={setStatusMsg}
+                  checkPayment={checkPayment}
+                  checking={checking}
+                  polling={polling}
+                  lastStatus={lastStatus}
+                  lastCheckedAt={lastCheckedAt}
+                />
               )}
             </div>
-
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// --- Small presentational block for invoice details (keeps App clean) ---
+function PurchaseDetails({
+  invoice,
+  statusMsg,
+  setStatusMsg,
+  checkPayment,
+  checking,
+  polling,
+  lastStatus,
+  lastCheckedAt,
+}: {
+  invoice: { id: string; address: string | null };
+  statusMsg: { text: string; kind: "info" | "success" | "error" } | null;
+  setStatusMsg: (v: { text: string; kind: "info" | "success" | "error" } | null) => void;
+  checkPayment: () => Promise<void>;
+  checking: boolean;
+  polling: boolean;
+  lastStatus: string | null;
+  lastCheckedAt: string | null;
+}) {
+  const isHttpLike = (s?: string | null) => !!s && /^https?:\/\//i.test(s);
+  const isWalletAddress = (s?: string | null) => !!s && !isHttpLike(s);
+
+  return (
+    <div className="space-y-3">
+      {statusMsg && (
+        <div
+          className={[
+            "rounded-lg p-3 text-sm",
+            statusMsg.kind === "success"
+              ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+              : statusMsg.kind === "error"
+              ? "bg-rose-50 text-rose-700 border border-rose-200"
+              : "bg-neutral-50 text-neutral-700 border border-neutral-200",
+          ].join(" ")}
+        >
+          {statusMsg.text}
+        </div>
+      )}
+
+      <div className="text-sm">
+        Invoice ID: <span className="font-mono">{invoice.id}</span>
+      </div>
+
+      {invoice.address && (
+        <>
+          <div className="text-sm break-words flex items-start gap-2">
+            <div className="flex-1">
+              {isWalletAddress(invoice.address) ? "Payment address" : "Invoice URL"}:{" "}
+              <span className="font-mono">{invoice.address}</span>
+            </div>
+            {/* Copy icon */}
+            {isWalletAddress(invoice.address) && (
+              <button
+                onClick={() =>
+                  navigator.clipboard.writeText(invoice.address!).then(
+                    () => setStatusMsg({ text: "Address copied. Send USDT (TRC20) to this address.", kind: "info" }),
+                    () => setStatusMsg({ text: "Could not copy. Please copy the address manually.", kind: "error" })
+                  )
+                }
+                className="shrink-0 rounded-md border border-neutral-300 px-2 py-1 text-sm hover:bg-neutral-50"
+                title="Copy address"
+              >
+                📋
+              </button>
+            )}
+          </div>
+
+          {/* QR */}
+          {isWalletAddress(invoice.address) && (
+            <div className="flex items-center justify-center">
+              <img
+                className="rounded-xl border border-neutral-200 p-2"
+                alt="QR"
+                width={180}
+                height={180}
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(invoice.address)}`}
+              />
+            </div>
+          )}
+        </>
+      )}
+
+      <div className="grid grid-cols-2 gap-2">
+        {/* Smart Open/Copy */}
+        <button
+          className="px-4 py-2 rounded-xl bg-white border border-neutral-300 text-center"
+          onClick={() => {
+            if (!invoice?.address) return;
+            if (isHttpLike(invoice.address)) {
+              window.open(invoice.address, "_blank");
+            } else {
+              navigator.clipboard.writeText(invoice.address).then(
+                () => setStatusMsg({ text: "Address copied. Send USDT (TRC20) to this address.", kind: "info" }),
+                () => setStatusMsg({ text: "Could not copy. Please copy the address manually.", kind: "error" })
+              );
+            }
+          }}
+        >
+          {isHttpLike(invoice?.address) ? "Open Invoice" : "Copy Address"}
+        </button>
+
+        {/* Check status now */}
+        <button
+          onClick={checkPayment}
+          disabled={checking}
+          className={`px-4 py-2 rounded-xl text-white font-semibold ${
+            checking ? "bg-neutral-700 opacity-80" : "bg-neutral-900"
+          }`}
+        >
+          {checking ? "Checking…" : "Check status now"}
+        </button>
+      </div>
+
+      <div className="text-[12px] text-neutral-500">
+        {polling ? "Auto-checking every 30s." : "Auto-check stopped."}
+        {lastStatus && (
+          <>
+            {" "}Status: <span className="font-medium">{lastStatus}</span>
+            {lastCheckedAt && <> — last check: {lastCheckedAt}</>}
+          </>
+        )}
+      </div>
     </div>
   );
 }
